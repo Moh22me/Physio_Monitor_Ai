@@ -6,3 +6,8 @@ requests
 streamlit-lottie
 scikit-learn
 joblib
+pyserial
+opencv-python
+mediapipe
+sqlalchemy
+fpdf2

@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 data/*.db
 models/*.task
+__pycache__/
+*.pyc
+*.db
+.vscode/
+venv/
+.env

@@ -1,265 +1,305 @@
-# session_manager.py
-from datetime import datetime
 import os
-from fpdf import FPDF
+import sqlite3
+from datetime import datetime
 import pandas as pd
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
 
-os.makedirs("data", exist_ok=True)
-DATABASE_URL = "sqlite:///data/physio_sessions.db"
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+DB_PATH = "physio_sessions.db"
 
 
-class ClinicalSession(Base):
-    """SQLAlchemy ORM model representing a multi-modal clinical rehab session."""
-
-    __tablename__ = "clinical_sessions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.now)
-    patient_id = Column(String(50), index=True, nullable=False)
-    patient_name = Column(String(100), nullable=False)
-    exercise_type = Column(String(100), default="General Assessment")
-
-    # Physiological & ML Metrics
-    heart_rate = Column(Float, default=0.0)
-    spo2 = Column(Float, default=0.0)
-    sys_bp = Column(Integer, default=120)
-    dia_bp = Column(Integer, default=80)
-    body_temp = Column(Float, default=37.0)
-    ai_diagnosis = Column(String(100), default="N/A")
-    ai_confidence = Column(Float, default=0.0)
-
-    # Computer Vision Biomechanics & Pain Metrics
-    joint_angle = Column(Float, default=0.0)
-    reps_completed = Column(Integer, default=0)
-    shoulder_tilt = Column(Float, default=0.0)
-    pain_score = Column(Float, default=0.0)
-    clinical_status = Column(String(150), default="Stable")
-    therapist_notes = Column(String(500), default="")
-
-
-def init_db():
-    """Create database tables if they do not exist."""
-    Base.metadata.create_all(bind=engine)
+def init_db() -> None:
+    """Ensure SQLite sessions table exists."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            patient_id TEXT,
+            patient_name TEXT,
+            hr REAL,
+            spo2 REAL,
+            sys_bp INTEGER,
+            dia_bp INTEGER,
+            temp REAL,
+            diagnosis TEXT,
+            confidence REAL,
+            reps INTEGER,
+            pain_score REAL,
+            notes TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
 
 
-def save_clinical_record(
+def save_session(
     patient_id: str,
     patient_name: str,
-    exercise_type: str,
-    vitals: dict,
-    ai_diagnosis: str,
-    ai_confidence: float,
-    vision_data: dict,
-    clinical_status: str,
-    therapist_notes: str = "",
-) -> int:
-    """Persist a combined hardware + AI + vision session snapshot into SQLite."""
-    db = SessionLocal()
-    try:
-        record = ClinicalSession(
-            timestamp=datetime.now(),
-            patient_id=patient_id.strip() or "PT-001",
-            patient_name=patient_name.strip() or "Anonymous Patient",
-            exercise_type=exercise_type,
-            heart_rate=float(vitals.get("hr", 0.0)),
-            spo2=float(vitals.get("spo2", 0.0)),
-            sys_bp=int(vitals.get("sys_bp", 120)),
-            dia_bp=int(vitals.get("dia_bp", 80)),
-            body_temp=float(vitals.get("temp", 37.0)),
-            ai_diagnosis=str(ai_diagnosis),
-            ai_confidence=round(float(ai_confidence), 2),
-            joint_angle=float(vision_data.get("joint_angle", 0.0)),
-            reps_completed=int(vision_data.get("reps", 0)),
-            shoulder_tilt=float(vision_data.get("shoulder_tilt", 0.0)),
-            pain_score=float(vision_data.get("pain_score", 0.0)),
-            clinical_status=str(clinical_status),
-            therapist_notes=therapist_notes.strip(),
+    hr: float,
+    spo2: float,
+    sys_bp: int,
+    dia_bp: int,
+    temp: float,
+    diagnosis: str,
+    confidence: float,
+    reps: int,
+    pain_score: float,
+    notes: str,
+) -> bool:
+    """Insert a new rehabilitation & telemetry record into SQLite."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO sessions (
+            timestamp, patient_id, patient_name, hr, spo2,
+            sys_bp, dia_bp, temp, diagnosis, confidence, reps, pain_score, notes
         )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
-        return record.id
-    finally:
-        db.close()
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            patient_id,
+            patient_name,
+            float(hr),
+            float(spo2),
+            int(sys_bp),
+            int(dia_bp),
+            float(temp),
+            str(diagnosis),
+            float(confidence),
+            int(reps),
+            float(pain_score),
+            str(notes),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 
-def fetch_all_sessions() -> pd.DataFrame:
-    """Retrieve all stored clinical sessions ordered by newest first."""
-    db = SessionLocal()
+def get_all_sessions() -> pd.DataFrame:
+    """Return all recorded patient sessions sorted newest first."""
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame()
+    conn = sqlite3.connect(DB_PATH)
     try:
-        rows = db.query(ClinicalSession).order_by(ClinicalSession.timestamp.desc()).all()
-        if not rows:
-            return pd.DataFrame()
-        data = [
-            {
-                "Session ID": r.id,
-                "Date & Time": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                "Patient ID": r.patient_id,
-                "Patient Name": r.patient_name,
-                "Exercise": r.exercise_type,
-                "HR (bpm)": r.heart_rate,
-                "SpO2 (%)": r.spo2,
-                "BP (mmHg)": f"{r.sys_bp}/{r.dia_bp}",
-                "Temp (C)": r.body_temp,
-                "AI Diagnosis": r.ai_diagnosis,
-                "Confidence (%)": r.ai_confidence,
-                "Joint Angle (deg)": r.joint_angle,
-                "Reps": r.reps_completed,
-                "Shoulder Tilt (deg)": r.shoulder_tilt,
-                "Pain Index (%)": r.pain_score,
-                "Clinical Status": r.clinical_status,
-                "Notes": r.therapist_notes,
-            }
-            for r in rows
-        ]
-        return pd.DataFrame(data)
+        df = pd.read_sql_query("SELECT * FROM sessions ORDER BY id DESC", conn)
+    except Exception:
+        df = pd.DataFrame()
     finally:
-        db.close()
+        conn.close()
+    return df
 
 
-def delete_session_by_id(session_id: int) -> bool:
-    """Delete a specific clinical record by ID."""
-    db = SessionLocal()
-    try:
-        record = db.query(ClinicalSession).filter(ClinicalSession.id == session_id).first()
-        if record:
-            db.delete(record)
-            db.commit()
-            return True
-        return False
-    finally:
-        db.close()
+def _clean_latin1(text) -> str:
+    """Sanitize text for FPDF core Helvetica font."""
+    cleaned = str(text if text is not None else "-").encode("latin-1", "replace").decode("latin-1").strip()
+    return cleaned if cleaned else "-"
 
 
-def _latin_safe(text: str) -> str:
-    """Ensure text is compatible with core PDF fonts without encoding errors."""
-    return str(text).encode("latin-1", "replace").decode("latin-1")
+def build_clinical_pdf(record: dict) -> bytes:
+    """Generate a styled, hospital-grade clinical PDF report with structured tables."""
+    if FPDF is None:
+        return b""
 
-
-class ClinicalReportPDF(FPDF):
-    """Custom styled hospital-grade PDF report template."""
-
-    def header(self):
-        self.set_fill_color(13, 43, 42)
-        self.rect(0, 0, 210, 32, "F")
-        self.set_text_color(0, 255, 204)
-        self.set_font("Helvetica", "B", 18)
-        self.set_y(8)
-        self.cell(0, 8, "PHYSIO MONITOR AI SYSTEM", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.set_text_color(220, 230, 235)
-        self.set_font("Helvetica", "", 10)
-        self.cell(
-            0,
-            6,
-            "Multi-Modal Physiological & Biomechanical Rehabilitation Report",
-            align="C",
-            new_x="LMARGIN",
-            new_y="NEXT",
-        )
-        self.ln(10)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("Helvetica", "I", 8)
-        self.set_text_color(120, 120, 120)
-        self.cell(
-            0,
-            10,
-            f"Generated by Physio Monitor AI Clinical Decision Support | Page {self.page_no()}",
-            align="C",
-        )
-
-
-def generate_session_pdf(record_row: dict) -> bytes:
-    """Build a formatted PDF report from a session dictionary and return raw bytes."""
-    pdf = ClinicalReportPDF()
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_margins(left=15, top=15, right=15)
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=20)
 
-    # 1. Patient & Session Metadata Block
-    pdf.set_text_color(20, 30, 40)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_fill_color(235, 245, 244)
-    pdf.cell(0, 9, "  1. PATIENT & SESSION INFORMATION", fill=True, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+    usable_w = 180.0  # A4 width (210mm) - 30mm margins
 
+    # --- 1. TOP CLINICAL HEADER BANNER ---
+    pdf.set_fill_color(15, 23, 42)  # Dark Navy #0F172A
+    pdf.rect(15, 15, usable_w, 26, style="F")
+    pdf.set_fill_color(16, 185, 129)  # Emerald Accent Strip #10B981
+    pdf.rect(15, 41, usable_w, 2.2, style="F")
+
+    pdf.set_xy(20, 19)
+    pdf.set_text_color(16, 185, 129)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(usable_w - 10, 8, "PHYSIO MONITOR AI", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_x(20)
+    pdf.set_text_color(226, 232, 240)
     pdf.set_font("Helvetica", "", 10)
-    meta_pairs = [
-        ("Session ID:", f"#{record_row.get('Session ID', 'LIVE')}", "Date & Time:", str(record_row.get("Date & Time", datetime.now().strftime("%Y-%m-%d %H:%M")))),
-        ("Patient Name:", _latin_safe(record_row.get("Patient Name", "N/A")), "Patient ID:", _latin_safe(record_row.get("Patient ID", "N/A"))),
-        ("Target Exercise:", _latin_safe(record_row.get("Exercise", "N/A")), "Clinical Status:", _latin_safe(record_row.get("Clinical Status", "N/A"))),
+    pdf.cell(
+        usable_w - 10,
+        6,
+        "Multi-Modal Clinical Telemetry & Biomechanical Rehabilitation Report",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    pdf.ln(9)
+
+    # --- 2. PATIENT & SESSION METADATA TABLE ---
+    pdf.set_text_color(15, 23, 42)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_x(15)
+    pdf.cell(usable_w, 7, "1. PATIENT & SESSION IDENTIFICATION", new_x="LMARGIN", new_y="NEXT")
+
+    meta_rows = [
+        ("Patient ID:", _clean_latin1(record.get("patient_id", "PT-101")), "Session Date:", _clean_latin1(record.get("timestamp", "-"))),
+        ("Patient Name:", _clean_latin1(record.get("patient_name", "Ahmed Hassan")), "Record ID:", f"#{_clean_latin1(record.get('id', '1'))}"),
+    ]
+    col_widths = [35.0, 55.0, 35.0, 55.0]
+    for r in meta_rows:
+        pdf.set_x(15)
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_draw_color(203, 213, 225)
+        for idx, val in enumerate(r):
+            is_label = (idx % 2 == 0)
+            pdf.set_font("Helvetica", "B" if is_label else "", 9.5)
+            pdf.cell(col_widths[idx], 8, f" {val}", border=1, fill=is_label, new_x="RIGHT", new_y="TOP")
+        pdf.ln(8)
+    pdf.ln(5)
+
+    # --- 3. AI DIAGNOSTIC SUMMARY BOX ---
+    diagnosis = _clean_latin1(record.get("diagnosis", "Healthy"))
+    conf = float(record.get("confidence", 0.0))
+    is_healthy = (diagnosis.lower() == "healthy" and conf >= 80.0)
+
+    pdf.set_x(15)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(usable_w, 7, "2. AI CLINICAL TRIAGE ASSESSMENT", new_x="LMARGIN", new_y="NEXT")
+
+    if is_healthy:
+        pdf.set_fill_color(236, 253, 245)
+        pdf.set_draw_color(16, 185, 129)
+        status_rgb = (5, 150, 105)
+        rec_text = "Vital signs are stable within normal physiological resting ranges."
+    else:
+        pdf.set_fill_color(254, 242, 242)
+        pdf.set_draw_color(239, 68, 68)
+        status_rgb = (220, 38, 38)
+        rec_text = "Abnormal physiological parameter detected. Clinical review is advised."
+
+    box_y = pdf.get_y()
+    pdf.rect(15, box_y, usable_w, 20, style="DF")
+    pdf.set_xy(19, box_y + 3)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(*status_rgb)
+    pdf.cell(usable_w - 8, 7, f"Primary Diagnosis: {diagnosis}   |   Model Confidence: {conf:.1f}%", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_x(19)
+    pdf.set_font("Helvetica", "", 9.5)
+    pdf.set_text_color(51, 65, 85)
+    pdf.cell(usable_w - 8, 6, rec_text, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_y(box_y + 24)
+
+    # --- 4. PHYSIOLOGICAL VITAL SIGNS TABLE ---
+    pdf.set_x(15)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(usable_w, 7, "3. PHYSIOLOGICAL TELEMETRY MEASUREMENTS", new_x="LMARGIN", new_y="NEXT")
+
+    v_widths = [62.0, 40.0, 44.0, 34.0]
+    headers = ["Vital Parameter", "Measured Value", "Reference Range", "Status"]
+    pdf.set_x(15)
+    pdf.set_fill_color(30, 41, 59)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 9.5)
+    for w_c, h_txt in zip(v_widths, headers):
+        pdf.cell(w_c, 8.5, f" {h_txt}", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.ln(8.5)
+
+    hr = float(record.get("hr", 0.0))
+    spo2 = float(record.get("spo2", 0.0))
+    sys_bp = int(record.get("sys_bp", 120))
+    dia_bp = int(record.get("dia_bp", 80))
+    temp = float(record.get("temp", 36.8))
+
+    vital_rows = [
+        ("Heart Rate (Optical PPG)", f"{hr:.1f} bpm", "60.0 - 100.0 bpm", "NORMAL" if 60 <= hr <= 100 else ("NO DATA" if hr <= 0 else "ABNORMAL")),
+        ("Blood Oxygen Saturation (SpO2)", f"{spo2:.1f} %", "95.0 - 100.0 %", "NORMAL" if spo2 >= 95 else ("NO DATA" if spo2 <= 0 else "LOW SPO2")),
+        ("Systolic Blood Pressure", f"{sys_bp} mmHg", "90 - 129 mmHg", "NORMAL" if 90 <= sys_bp <= 129 else "ELEVATED"),
+        ("Diastolic Blood Pressure", f"{dia_bp} mmHg", "60 - 84 mmHg", "NORMAL" if 60 <= dia_bp <= 84 else "ELEVATED"),
+        ("Body Temperature", f"{temp:.1f} C", "36.1 - 37.5 C", "NORMAL" if 36.1 <= temp <= 37.5 else "ABNORMAL"),
     ]
 
-    for lbl1, val1, lbl2, val2 in meta_pairs:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(35, 7, lbl1)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(60, 7, val1)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(35, 7, lbl2)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(60, 7, val2, new_x="LMARGIN", new_y="NEXT")
+    for row_idx, (param, val_str, ref_str, st_str) in enumerate(vital_rows):
+        pdf.set_x(15)
+        if row_idx % 2 == 0:
+            pdf.set_fill_color(248, 250, 252)
+        else:
+            pdf.set_fill_color(255, 255, 255)
+        pdf.set_draw_color(203, 213, 225)
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font("Helvetica", "", 9.5)
 
-    pdf.ln(6)
+        pdf.cell(v_widths[0], 8, f" {param}", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.cell(v_widths[1], 8, f" {val_str}", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+        pdf.set_font("Helvetica", "", 9.5)
+        pdf.cell(v_widths[2], 8, f" {ref_str}", border=1, fill=True, new_x="RIGHT", new_y="TOP")
 
-    # 2. Physiological Telemetry & ML Inference
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_fill_color(235, 245, 244)
-    pdf.cell(0, 9, "  2. PHYSIOLOGICAL TELEMETRY & AI DIAGNOSIS", fill=True, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+        if st_str == "NORMAL":
+            pdf.set_text_color(5, 150, 105)
+        elif st_str == "NO DATA":
+            pdf.set_text_color(180, 83, 9)
+        else:
+            pdf.set_text_color(220, 38, 38)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(v_widths[3], 8, f" {st_str}", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+        pdf.ln(8)
 
-    vitals_rows = [
-        ("Heart Rate (Arduino / Sensor)", f"{record_row.get('HR (bpm)', 0)} bpm"),
-        ("Blood Oxygen Saturation (SpO2)", f"{record_row.get('SpO2 (%)', 0)} %"),
-        ("Blood Pressure (Systolic/Diastolic)", f"{record_row.get('BP (mmHg)', '120/80')} mmHg"),
-        ("Body Temperature", f"{record_row.get('Temp (C)', 37.0)} C"),
-        ("AI Predicted Condition", _latin_safe(record_row.get("AI Diagnosis", "N/A"))),
-        ("Model Diagnostic Confidence", f"{record_row.get('Confidence (%)', 0)} %"),
-    ]
+    pdf.ln(5)
 
-    for metric_name, metric_val in vitals_rows:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(95, 8, f"  {metric_name}", border=1)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(95, 8, f"  {metric_val}", border=1, new_x="LMARGIN", new_y="NEXT")
+    # --- 5. REHABILITATION & BIOMECHANICS SUMMARY ---
+    pdf.set_x(15)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(usable_w, 7, "4. REHABILITATION & BIOMECHANICAL VISION SUMMARY", new_x="LMARGIN", new_y="NEXT")
 
-    pdf.ln(6)
+    reps = int(record.get("reps", 0))
+    pain = float(record.get("pain_score", 0.0))
+    notes = _clean_latin1(record.get("notes", "Completed session safely."))
 
-    # 3. Computer Vision Biomechanics & Pain Assessment
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_fill_color(235, 245, 244)
-    pdf.cell(0, 9, "  3. COMPUTER VISION BIOMECHANICS & DISTRESS ANALYSIS", fill=True, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+    pdf.set_x(15)
+    pdf.set_fill_color(241, 245, 249)
+    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.cell(55.0, 8, " Completed Repetitions:", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.set_font("Helvetica", "", 9.5)
+    pdf.cell(35.0, 8, f" {reps} reps", border=1, fill=False, new_x="RIGHT", new_y="TOP")
+    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.cell(55.0, 8, " Facial Pain Index:", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.set_font("Helvetica", "", 9.5)
+    pdf.cell(35.0, 8, f" {pain:.1f} %", border=1, fill=False, new_x="LMARGIN", new_y="NEXT")
 
-    vision_rows = [
-        ("Measured Joint Flexion Angle", f"{record_row.get('Joint Angle (deg)', 0)} degrees"),
-        ("Completed Rehabilitation Reps", f"{record_row.get('Reps', 0)} repetitions"),
-        ("Postural Shoulder Alignment Tilt", f"{record_row.get('Shoulder Tilt (deg)', 0)} degrees"),
-        ("Facial Pain & Distress Index", f"{record_row.get('Pain Index (%)', 0)} %"),
-    ]
+    pdf.set_x(15)
+    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.cell(55.0, 8, " Clinical Notes:", border=1, fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.set_font("Helvetica", "", 9.5)
+    pdf.multi_cell(usable_w - 55.0, 8, f" {notes}", border=1, new_x="LMARGIN", new_y="NEXT")
 
-    for v_name, v_val in vision_rows:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(95, 8, f"  {v_name}", border=1)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(95, 8, f"  {v_val}", border=1, new_x="LMARGIN", new_y="NEXT")
+    # --- 6. FOOTER ---
+    pdf.ln(8)
+    pdf.set_draw_color(203, 213, 225)
+    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_x(15)
+    pdf.set_font("Helvetica", "I", 8.5)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(
+        usable_w,
+        6,
+        "Generated by Physio Monitor AI Clinical Platform | Automated Biometric & Vision Telemetry Summary.",
+        align="C",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
 
-    pdf.ln(6)
-
-    # 4. Clinical Notes Section
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_fill_color(235, 245, 244)
-    pdf.cell(0, 9, "  4. THERAPIST OBSERVATIONS & RECOMMENDATIONS", fill=True, new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
-
-    notes_text = _latin_safe(record_row.get("Notes", "")) or "No additional therapist remarks recorded for this session."
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 6, notes_text, border=1)
-
-    return bytes(pdf.output())
+    raw_output = pdf.output()
+    if isinstance(raw_output, (bytes, bytearray)):
+        return bytes(raw_output)
+    return str(raw_output).encode("latin-1")

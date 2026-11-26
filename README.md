@@ -1,109 +1,131 @@
- Physio Monitor AI System
+# 🩺 Physio Monitor AI — Multi-Modal Clinical Telemetry & Rehabilitation Platform
 
-📌 About The Project
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-Clinical_UI-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![ESP32](https://img.shields.io/badge/Hardware-ESP32_%2B_MAX30102-00979D?style=for-the-badge&logo=espressif&logoColor=white)
+![Scikit-Learn](https://img.shields.io/badge/ML-Random_Forest-F7931E?style=for-the-badge&logo=scikitlearn&logoColor=white)
+![MediaPipe](https://img.shields.io/badge/Vision-MediaPipe_%2B_OpenCV-00A8E8?style=for-the-badge&logo=opencv&logoColor=white)
 
-Physio Monitor AI is a comprehensive Clinical Decision Support System (CDSS) and real-time vital signs monitoring dashboard. Built for healthcare professionals and physical therapy rehabilitation, this system leverages Machine Learning to analyze patient hemodynamics and predict potential diseases with a confidence score.
+**Physio Monitor AI** is an end-to-end, multi-modal clinical monitoring and physical therapy rehabilitation system. It fuses **real-time IoT physiological telemetry** (ESP32 + GY-MAX3010X optical PPG sensor), **hybrid Machine Learning clinical triage** (Random Forest + physiological guardrails), **computer vision biomechanics & facial pain estimation** (MediaPipe Pose & Face Landmarkers), and **automated hospital-grade PDF reporting** (SQLite + FPDF2).
 
-✨ Key Features
+---
 
-🩺 Live Patient Monitor: Real-time visualization of vital parameters (Heart Rate, SpO2, Blood Pressure, Body Temperature).
+## 🏗️ System Architecture
 
-📈 Dynamic ECG Simulation: Live Electrocardiogram (ECG) waveform generation based on the patient's actual heart rate using Plotly.
+```mermaid
+flowchart LR
+    subgraph Hardware ["1. Embedded IoT Layer (ESP32)"]
+        S[GY-MAX3010X Sensor] -->|I2C D21/D22 @ 100kHz| MCU[ESP32 DevKit V1]
+        MCU -->|DSP: Low-Pass + Schmitt Trigger + Maxim SpO2| SER[USB Serial @ 115200 baud]
+    end
 
-🧪 AI Disease Predictor: A robust Machine Learning engine (Random Forest) hyperparameter-tuned to predict health conditions based on custom clinical inputs.
+    subgraph Vision ["2. Biomechanical Vision Layer"]
+        CAM[Webcam / Snapshot / Upload] --> MP1[MediaPipe Pose: 33 Landmarks]
+        CAM --> MP2[MediaPipe Face: 478 Landmarks]
+        MP1 --> FSM[Joint Angle & Rep FSM]
+        MP2 --> PAIN[Normalized Facial Pain Index]
+    end
 
-🚦 Clinical Confidence System: Intelligent alerting mechanism that evaluates the AI's confidence score (Red/Yellow/Green) to recommend physician intervention.
+    subgraph Core ["3. Clinical AI & Dashboard Engine (Streamlit)"]
+        SER --> HS[hardware_stream.py]
+        HS --> ML[Hybrid Random Forest + Triage Engine]
+        FSM & PAIN --> VE[vision_engine.py]
+        ML & VE --> UI[app.py: 5-Tab Clinical Platform]
+    end
 
-📊 Data Analysis: Interactive dataset overview and condition distribution charts.
+    subgraph Storage ["4. Persistence & Reporting"]
+        UI --> DB[(SQLite: physio_sessions.db)]
+        DB --> PDF[session_manager.py: FPDF2 Clinical Report]
+    end
+```
 
-✨ Modern UI: Neon/X-ray aesthetics with Lottie animations for an immersive medical monitoring experience.
+---
 
-🛠️ Tech Stack
+## ✨ Key Engineering Features
 
-Frontend & Dashboard: Streamlit
+### 1. Embedded PPG Signal Processing (`firmware/esp32_max30102.ino`)
+* **Auto-Chip & Pin Detection:** Automatically detects `MAX30102` (`0x15`) or `MAX30100` (`0x11`) across standard `(D21, D22)` or swapped `(D22, D21)` I2C wiring with automatic bus recovery.
+* **100Hz Digital Filtering Pipeline:** Implements DC baseline tracking, a two-stage low-pass filter (`~4.5Hz` cutoff) to eliminate motion artifacts, and a **Schmitt-Trigger hysteresis beat detector** with a 5-beat median interval buffer to reject dicrotic notch double-counting.
+* **Calibrated SpO2 & Core Temperature:** Computes oxygen saturation via Maxim's empirical quadratic AC/DC ratio curve and reads non-blocking die temperature registers (`0x1F`–`0x21`) calibrated for peripheral skin-to-core offset.
+* **Instant Finger-Lift Reset:** Immediately resets telemetry to `0,0,0` upon finger removal to prevent stale readings.
 
-Machine Learning: Scikit-Learn (RandomForestClassifier, GridSearchCV)
+### 2. Hybrid AI Clinical Triage (`app.py`)
+* **Calibrated Random Forest Inference:** Evaluates 11 clinical features (Heart Rate, SpO2, Systolic BP, Diastolic BP, Body Temperature, Fall Status, Sensor Accuracy, and 4 binary clinical alert flags) normalized via `StandardScaler`.
+* **Clinical Guardrail Fusion:** Pairs ML class probabilities with physiological triage thresholds (`Hypoxia`, `Hypertension`, `Tachycardia`, `Bradycardia`, `Fever`, `Critical Fall Alert`, and `Healthy`) to deliver reliable diagnostic confidence scores (`91%–98%` at healthy rest) and a synchronized Lead-II ECG monitor.
+* **Live Physiological Simulator:** Built-in fallback waveform generator for seamless offline testing and clinical demonstrations.
 
-Data Manipulation: Pandas, NumPy
+### 3. Multi-Modal Vision & Pain Fusion (`vision_engine.py`)
+* **3 Vision Input Modes:** Supports live webcam streaming, single-frame clinical camera snapshots, and uploaded patient images.
+* **6 Guided Rehabilitation Exercises:** Tracks `Elbow Flexion`, `Shoulder Abduction`, `Shoulder Forward Flexion`, `Knee Extension`, `Squat / Sit-to-Stand`, and `Posture & Cervical Symmetry` across Left/Right sides using vector trigonometry (`atan2`) and a Finite State Machine (FSM) repetition counter.
+* **Facial Pain & Distress Index:** Extracts normalized brow furrow strain, eyelid squint, and mouth tension metrics from 478 facial landmarks, fusing exertion pain with live heart rate to trigger safety alerts.
 
-Data Visualization: Plotly
+### 4. Session Persistence & Clinical PDF Reports (`session_manager.py`)
+* **Local SQLite Database:** Stores timestamped patient telemetry, AI diagnosis, repetition counts, pain scores, and therapist notes in `physio_sessions.db`.
+* **One-Click PDF Export:** Generates structured, multi-table clinical reports with reference ranges, status indicators, and diagnostic triage banners using `FPDF2`.
 
-Model Persistence: Joblib
+---
 
-📁 Project Structure
+## 🔌 Hardware Pinout (`ESP32` ↔ `GY-MAX3010X`)
 
+| Sensor Pin | ESP32 DevKit V1 Pin | Protocol / Function |
+| :--- | :--- | :--- |
+| **VIN** | `VIN` (5V) or `3V3` | Regulated Power Supply |
+| **GND** | `GND` | Common Ground |
+| **SDA** | `D21` (GPIO 21) | I2C Serial Data (`100kHz`) |
+| **SCL** | `D22` (GPIO 22) | I2C Serial Clock (`100kHz`) |
+
+---
+
+## 📁 Repository Structure
+
+```text
 Physio_Monitor_Pro/
-│
-├── models/                              # Generated ML models and scalers
-│   ├── physio_monitor_rf_optimized.pkl
-│   ├── feature_scaler.pkl
-│   └── le_target.pkl
-│
-├── data/                                # Dataset folder
-│   └── Synthetic_patient-HealthCare-Monitoring_dataset.csv
-│
-├── app.py                               # Main Streamlit Dashboard Application
-├── train.py                             # ML Training and artifact generation script
-├── requirements.txt                     # Project dependencies
-└── README.md                            # Project documentation
+├── app.py                                          # Main Streamlit dashboard, Lead-II ECG & Hybrid ML engine
+├── hardware_stream.py                              # USB Serial port manager & real-time telemetry parser
+├── vision_engine.py                                # MediaPipe 33-point Pose & 478-point Face pain analyzer
+├── session_manager.py                              # SQLite database handler & FPDF2 clinical PDF generator
+├── firmware/
+│   └── esp32_max30102.ino                          # C++ firmware for ESP32 + MAX30102/MAX30100
+├── physio_monitor_rf_optimized.pkl                 # Trained Random Forest classifier artifact
+├── feature_scaler.pkl                              # Fitted StandardScaler artifact
+├── le_target.pkl                                   # Target diagnosis LabelEncoder artifact
+├── pose_landmarker_lite.task                       # MediaPipe Pose Landmarker model
+├── face_landmarker.task                            # MediaPipe Face Landmarker model
+├── Synthetic_patient-HealthCare-Monitoring_dataset.csv # Clinical dataset for exploratory analytics
+├── .gitignore                                      # Excludes cache, virtual environments & local DB files
+└── README.md                                       # Project documentation
+```
 
+---
 
-🚀 Getting Started
+## 🚀 Installation & Quick Start
 
-Prerequisites
+### 1. Clone the Repository & Install Dependencies
+```bash
+git clone [https://github.com/Moh22me/Physio_Monitor_Pro.git](https://github.com/Moh22me/Physio_Monitor_Pro.git)
+cd Physio_Monitor_Pro
+pip install streamlit numpy pandas scikit-learn joblib pyserial plotly opencv-python mediapipe fpdf2
+```
 
-Make sure you have Python 3.9+ installed on your system.
+### 2. Flash the ESP32 Firmware
+1. Open `firmware/esp32_max30102.ino` in **Arduino IDE**.
+2. Select board **DOIT ESP32 DEVKIT V1** and your active COM port (e.g., `COM6`).
+3. Click **Upload** and ensure **Serial Monitor** is closed before launching the dashboard.
 
-Installation & Setup
-
-Clone the repository
-
-git clone https://github.com/Moh22me/Physio_Monitor_Ai.git
-cd Physio_Monitor_Ai
-
-
-Create and activate a virtual environment
-
-python -m venv venv
-# On Windows:
-.\venv\Scripts\activate
-# On Mac/Linux:
-source venv/bin/activate
-
-
-Install the dependencies
-
-pip install -r requirements.txt
-
-
-Train the AI Model (Generate .pkl files)
-
-python train.py
-
-
-Run the Application
-
+### 3. Launch the Clinical Platform
+```bash
 streamlit run app.py
+```
+1. Enter the **Patient ID** and **Patient Name** in the sidebar.
+2. Select **`🔌 Arduino Nano (USB Serial)`**, choose your COM port at **`115200` baud**, and click **Connect** (or use **`🟢 Live Physiological Simulator`** for hardware-free testing).
+3. Place a fingertip gently on the optical sensor lens to begin real-time telemetry and AI triage.
 
+---
 
-The application will automatically open in your browser at http://localhost:8501.
+## ⚠️ Clinical Disclaimer
+This platform is engineered as an academic and biomedical engineering prototype for physical therapy monitoring and decision support. It is not a certified medical device and should not replace professional clinical diagnosis.
 
-🧠 Model Training Details
+---
 
-The prediction engine uses a Random Forest Classifier. The dataset undergoes preprocessing where missing values are handled, categorical variables (like Fall Detection and Alerts) are encoded using LabelEncoder, and numerical features are scaled using StandardScaler. The final model achieves a high accuracy rate (approx. 95.7%) on the synthetic healthcare dataset.
-
-Deployment:
-<img width="1834" height="791" alt="Screenshot 2026-10-31 090118" src="https://github.com/user-attachments/assets/23f263b9-c506-4af5-b27f-2cef61f8c1e7" />
-<img width="1827" height="719" alt="Screenshot 2026-10-31 090303" src="https://github.com/user-attachments/assets/17918fc3-2596-42ff-9567-130d290177d8" />
-<img width="1826" height="799" alt="Screenshot 2026-10-31 090427" src="https://github.com/user-attachments/assets/e132b771-4b2b-48ae-8db8-583c025b177c" />
-<img width="1494" height="546" alt="Screenshot 2026-10-31 090515" src="https://github.com/user-attachments/assets/abc91129-971d-4de3-b7a4-f5ebd805f8cd" />
-<img width="1828" height="858" alt="Screenshot 2026-10-31 090650" src="https://github.com/user-attachments/assets/77c9ae65-085d-49e4-be68-b0b44b86091d" />
-<img width="1832" height="857" alt="Screenshot 2026-10-31 130039" src="https://github.com/user-attachments/assets/bd22dfc0-0b29-41e2-83d5-302c15744099" />
-<img width="1822" height="852" alt="Screenshot 2026-10-31 130952" src="https://github.com/user-attachments/assets/2f62eaf7-592b-4da9-8e7b-21c3feaebb80" />
-
-
-👨‍💻 Developer
-
-Mohamed Ayman - AI & Machine Learning Engineer | Database Developer
-
-Developed as a technical blueprint for an AI-enabled rehabilitation monitoring system.
+## 👨‍💻 Author
+**Mohamed Ayman** — AI Engineer | Embedded Biomedical Systems  
